@@ -7,6 +7,7 @@ Flask 后端 — 所有数据存在 data/*.json，照片存在 uploads/
     python app.py
 访问：http://localhost:5000
 """
+# webhook 自动部署测试 — 可删除此行
 import json, os, uuid, re, base64
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
