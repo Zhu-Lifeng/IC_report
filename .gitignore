@@ -2,6 +2,7 @@
 /data/
 /uploads/
 /reports_pdf/
+/report_config.json
 
 # Python
 __pycache__/

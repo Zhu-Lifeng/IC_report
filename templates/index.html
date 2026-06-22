@@ -14,6 +14,7 @@
 <nav id="nav">
   <button data-tab="properties" class="active">物业管理</button>
   <button data-tab="reports">报告记录</button>
+  <button id="btn-config">报告设置</button>
   <a href="/admin" class="site-link">系统后台 →</a>
 </nav>
 <main id="app"><div id="loading">加载中…</div></main>
@@ -483,6 +484,41 @@ async function deleteReport(rid){
   catch(e){ alert("删除失败："+e.message); }
 }
 
+// ── 报告封面设置 ──────────────────────────────────────────
+async function openConfigModal(){
+  let cfg;
+  try{ cfg = await api("/api/config"); }catch(e){ alert("加载配置失败："+e.message); return; }
+  const FIELDS = [
+    ["client","客户 / 委托方","Hampton Tower Management"],
+    ["postcode","邮编","E14 9GX"],
+    ["agent_name","制作人 / 中介姓名",""],
+    ["agent_phone","联系电话",""],
+    ["agent_email","邮箱",""],
+    ["agent_url","网址",""],
+  ];
+  const body = `
+    <div class="helper small">这些信息显示在生成的 PDF 报告封面与页眉。保存在服务器（不随代码部署被覆盖）。修改后<strong>新生成</strong>的报告才会生效。</div>
+    <div class="pair-grid">
+      ${FIELDS.map(([k,label,ph])=>`<div class="field"><label>${label}</label>
+        <input id="cfg-${k}" type="text" value="${esc(cfg[k]||"")}" placeholder="${esc(ph)}"/></div>`).join("")}
+    </div>
+    <hr/>
+    <div style="text-align:right">
+      <button class="subtle" id="cfg-cancel">取消</button>
+      <button class="primary" id="cfg-save">保存</button>
+    </div>`;
+  openModal("报告封面设置", body, {onMount:()=>{
+    document.getElementById("cfg-cancel").onclick = closeModal;
+    document.getElementById("cfg-save").onclick = async ()=>{
+      const out={};
+      FIELDS.forEach(([k])=>{ out[k]=document.getElementById("cfg-"+k).value.trim(); });
+      try{ await api("/api/config","PUT",out); closeModal();
+        alert("封面信息已保存。新生成的报告将使用更新后的信息。"); }
+      catch(e){ alert("保存失败："+e.message); }
+    };
+  }});
+}
+
 // ── Modal ─────────────────────────────────────────────────
 function openModal(title, html, opts={}){
   const root = document.getElementById("modal-root");
@@ -521,7 +557,9 @@ document.addEventListener("click", e=>{
 });
 
 document.getElementById("nav").addEventListener("click", e=>{
-  const t = e.target.closest("button"); if(!t||!t.dataset.tab) return;
+  const t = e.target.closest("button"); if(!t) return;
+  if(t.id==="btn-config"){ openConfigModal(); return; }
+  if(!t.dataset.tab) return;
   activeTab = t.dataset.tab;
   for(const b of document.querySelectorAll("#nav button")) b.classList.toggle("active",b.dataset.tab===activeTab);
   render();

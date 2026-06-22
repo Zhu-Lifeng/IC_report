@@ -22,19 +22,34 @@ DATA    = os.path.join(BASE, "data")
 UPLOAD  = os.path.join(BASE, "uploads")
 REPORTS = os.path.join(BASE, "reports_pdf")          # 生成的 PDF 报告
 SEED    = os.path.join(BASE, "seed.json")
-CONFIG  = os.path.join(BASE, "report_config.json")   # 封面配置
+CONFIG  = os.path.join(DATA, "report_config.json")   # 封面配置（运行时数据，不入 git）
 
 os.makedirs(DATA,    exist_ok=True)
 os.makedirs(UPLOAD,  exist_ok=True)
 os.makedirs(REPORTS, exist_ok=True)
 
+DEFAULT_CONFIG = {
+    "client": "", "agent_name": "", "agent_phone": "",
+    "agent_email": "", "agent_url": "", "postcode": "",
+}
 
 def report_config():
+    cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG, encoding="utf-8") as f:
-            return json.load(f)
+            cfg.update(json.load(f) or {})
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        pass
+    return cfg
+
+def save_report_config(d):
+    cfg = report_config()
+    for k in DEFAULT_CONFIG:
+        if k in d:
+            cfg[k] = (d.get(k) or "").strip()
+    with open(CONFIG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return cfg
 
 
 # ── 工具函数 ──────────────────────────────────────────────
@@ -491,6 +506,17 @@ def delete_report(rid):
         purge_report_photos(target)
     save("reports", [r for r in reports if r["id"] != rid])
     return "", 204
+
+
+# ── 报告封面配置 API ──────────────────────────────────────
+
+@app.route("/api/config", methods=["GET"])
+def get_config():
+    return jsonify(report_config())
+
+@app.route("/api/config", methods=["PUT"])
+def update_config():
+    return jsonify(save_report_config(request.json or {}))
 
 
 # ── 数据管理 API ──────────────────────────────────────────
