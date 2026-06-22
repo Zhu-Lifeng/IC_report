@@ -1,0 +1,15 @@
+# 运行时数据 —— 绝不纳入版本控制，否则部署会覆盖线上数据
+/data/
+/uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
