@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>物业管理 · Hampton Tower</title>
+<link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+<header>
+  <h1>Hampton Tower 物业管理</h1>
+  <span class="meta">数据存储于服务端 JSON</span>
+</header>
+<nav id="nav">
+  <button data-tab="properties" class="active">物业管理</button>
+  <button data-tab="reports">报告记录</button>
+  <a href="/admin" class="site-link">系统后台 →</a>
+</nav>
+<main id="app"><div id="loading">加载中…</div></main>
+<div id="modal-root"></div>
+
+<script>"use strict";
+// ── 状态 ──────────────────────────────────────────────────
+const DB = { properties:[], houseTypes:[], reports:[] };
+let activeTab = "properties";
+let pendingPhotos = {};
+let pendingComparison = {};
+
+// ── API 工具 ──────────────────────────────────────────────
+async function api(url, method="GET", body=null){
+  const opts = {method};
+  if(body!==null){ opts.headers={"Content-Type":"application/json"}; opts.body=JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  if(res.status===204) return null;
+  const json = await res.json().catch(()=>null);
+  if(!res.ok) throw new Error((json&&json.error)||res.statusText);
+  return json;
+}
+
+async function reload(){
+  try{
+    const [props, hts, reps] = await Promise.all([
+      api("/api/properties"), api("/api/housetypes"), api("/api/reports")
+    ]);
+    DB.properties = props;
+    DB.houseTypes = hts;
+    DB.reports = reps;
+  }catch(e){ console.error("加载失败", e); }
+  render();
+}
+
+// ── 辅助函数 ──────────────────────────────────────────────
+const STATUS_LABEL = {idle:"闲置", renting:"租住中", preparing:"准备中"};
+function deepClone(x){ return JSON.parse(JSON.stringify(x)); }
+function uid(p){ return p+"-"+Math.random().toString(36).slice(2,9); }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function allItems(prop){ return prop.rooms.flatMap(r=>r.items.map(it=>({roomId:r.id,roomName:r.name,item:it}))); }
+function getLatestCheckIn(pid){
+  const sorted = DB.reports.filter(r=>r.propertyId===pid).slice().sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+  let last = null;
+  for(const r of sorted){ if(r.type==="check-in") last=r; else if(r.type==="check-out") last=null; }
+  return last;
+}
+
+// ── 渲染 ──────────────────────────────────────────────────
+function render(){
+  const app = document.getElementById("app");
+  if(activeTab==="properties") app.innerHTML = viewProperties();
+  else app.innerHTML = viewReports();
+}
+
+function viewProperties(){
+  if(!DB.properties.length) return `
+    <div class="card">
+      <div class="toolbar"><h2 style="margin:0">物业列表（0 套）</h2>
+        <button class="primary" data-action="newProperty">+ 新建物业</button></div>
+      <p class="muted">暂无物业。点击右上角新建，或前往<a href="/admin">后台</a>创建户型模板后再新建。</p>
+    </div>`;
+  return `
+  <div class="card">
+    <div class="toolbar">
+      <h2 style="margin:0">物业列表（共 ${DB.properties.length} 套）</h2>
+      <button class="primary" data-action="newProperty">+ 新建物业</button>
+    </div>
+    <table>
+      <thead><tr><th>名称</th><th>地址</th><th>户型</th><th>房间</th><th>条目</th><th>状态</th><th style="min-width:340px">操作</th></tr></thead>
+      <tbody>
+        ${DB.properties.map(p=>{
+          const ht = DB.houseTypes.find(h=>h.id===p.houseTypeId);
+          const cnt = p.rooms.reduce((a,r)=>a+r.items.length,0);
+          return `<tr>
+            <td><strong>${esc(p.name)}</strong></td>
+            <td class="small muted">${esc(p.address||"—")}</td>
+            <td>${ht?esc(ht.name):'<span class="err">已删除</span>'}</td>
+            <td>${p.rooms.length}</td><td>${cnt}</td>
+            <td><span class="status-pill status-${p.status}">${STATUS_LABEL[p.status]}</span></td>
+            <td>
+              <button class="ghost tiny" data-action="editProperty" data-id="${p.id}">编辑结构</button>
+              <button class="primary tiny" data-action="checkIn" data-id="${p.id}" ${p.status==="idle"?"":"disabled"}>Check-in</button>
+              <button class="primary tiny" data-action="checkOut" data-id="${p.id}" ${p.status==="renting"?"":"disabled"}>Check-out</button>
+              <button class="subtle tiny" data-action="finishPrep" data-id="${p.id}" ${p.status==="preparing"?"":"disabled"}>完成准备</button>
+              <button class="danger tiny" data-action="deleteProperty" data-id="${p.id}">删除</button>
+            </td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h3>状态流转</h3>
+    <p class="small muted">闲置 → (Check-in) → 租住中 → (Check-out) → 准备中 → (完成准备) → 闲置</p>
+  </div>`;
+}
+
+function viewReports(){
+  if(!DB.reports.length) return `<div class="card"><p class="muted">暂无报告。请先在物业页提交 Check-in。</p></div>`;
+  const byProp = {};
+  for(const r of DB.reports)(byProp[r.propertyId]=byProp[r.propertyId]||[]).push(r);
+  return `
+  <div class="card">
+    <h2 style="margin-top:0">报告记录（共 ${DB.reports.length} 份）</h2>
+    ${Object.entries(byProp).map(([pid,list])=>{
+      const p = DB.properties.find(x=>x.id===pid);
+      return `<div class="report-card">
+        <strong>${p?esc(p.name):"（物业已删）"}</strong>
+        ${p?`<span class="small muted"> · ${esc(p.address||"")}</span>`:""}
+        <div class="tree-children" style="margin-top:8px">
+          ${list.slice().reverse().map(r=>{
+            const cnt = Object.values(r.photos).reduce((a,arr)=>a+(arr||[]).filter(Boolean).length,0);
+            return `<div class="tree-node" style="display:flex;justify-content:space-between;align-items:center">
+              <div>
+                <span class="badge ${r.type==="check-in"?"badge-furn":"badge-fac"}">${r.type}</span>
+                ${new Date(r.createdAt).toLocaleString()}
+                <span class="badge">${cnt} 张照片</span>
+              </div>
+              <div>
+                <button class="ghost tiny" data-action="viewReport" data-id="${r.id}">查看</button>
+                <button class="danger tiny" data-action="deleteReport" data-id="${r.id}">删除</button>
+              </div>
+            </div>`;
+          }).join("")}
+        </div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+// ── 物业操作 ──────────────────────────────────────────────
+async function newProperty(){
+  const name = prompt("新物业名称（如：Apartment 3802）");
+  if(!name) return;
+  if(!DB.houseTypes.length){ alert("请先在后台创建至少一种户型模板。"); return; }
+  const address = prompt("物业地址（可留空）")||"";
+  const options = DB.houseTypes.map((h,i)=>`${i+1}. ${h.name}`).join("\n");
+  const pick = prompt("选择户型编号：\n"+options,"1");
+  const idx = parseInt(pick,10)-1;
+  if(isNaN(idx)||idx<0||idx>=DB.houseTypes.length){ alert("无效选择。"); return; }
+  try{
+    await api("/api/properties","POST",{name,address,houseTypeId:DB.houseTypes[idx].id});
+    await reload();
+  }catch(e){ alert("创建失败："+e.message); }
+}
+
+async function deleteProperty(id){
+  const p = DB.properties.find(x=>x.id===id); if(!p) return;
+  if(!confirm(`删除物业「${p.name}」？相关报告与照片也会一并删除。`)) return;
+  try{ await api(`/api/properties/${id}`,"DELETE"); await reload(); }
+  catch(e){ alert("删除失败："+e.message); }
+}
+
+async function finishPrep(id){
+  if(!confirm("确认该物业已准备就绪，切回闲置状态？")) return;
+  try{ await api(`/api/properties/${id}/finishprep`,"POST"); await reload(); }
+  catch(e){ alert("操作失败："+e.message); }
+}
+
+// ── 物业结构编辑器（草稿模式，取消不写库） ────────────────
+function openPropertyEditor(id){
+  const p = DB.properties.find(x=>x.id===id); if(!p) return;
+  const draft = deepClone(p);
+  openModal(`编辑物业结构 — ${esc(p.name)}`, propEditorHTML(draft), {wide:true, onMount:()=>bindPropEditor(draft,id)});
+}
+
+function propEditorHTML(p){
+  return `
+  <div class="helper small">修改不会影响户型模板。点取消放弃所有改动。</div>
+  <div class="pair-grid">
+    <div class="field"><label>物业名称</label><input id="pname" type="text" value="${esc(p.name)}"/></div>
+    <div class="field"><label>地址</label><input id="paddress" type="text" value="${esc(p.address||"")}" placeholder="75 Marsh Wall…"/></div>
+  </div>
+  <div class="field small muted">户型：${esc((DB.houseTypes.find(h=>h.id===p.houseTypeId)||{}).name||"（已删）")}</div>
+  <hr/>
+  <div class="toolbar"><strong>房间清单</strong>
+    <button class="primary tiny" id="add-room-btn">+ 添加房间</button>
+  </div>
+  <div id="prop-rooms" class="tree">${p.rooms.map(r=>propRoomNode(r)).join("")}</div>
+  <hr/>
+  <div style="text-align:right">
+    <button class="subtle" id="cancel-prop">取消</button>
+    <button class="primary" id="save-prop">保存</button>
+  </div>`;
+}
+
+function propRoomNode(r){
+  return `<div class="tree-node collapsed" data-room="${r.id}">
+    <div class="tree-node-head">
+      <div class="tree-name">
+        <button class="toggle-btn" data-toggle="tree">▼</button>
+        <strong>🏠 ${esc(r.name)}</strong><span class="badge">${r.items.length}</span>
+      </div>
+      <div>
+        <button class="subtle tiny" data-pa="add-item" data-rid="${r.id}">+ 条目</button>
+        <button class="ghost tiny" data-pa="rename-room" data-rid="${r.id}">重命名</button>
+        <button class="danger tiny" data-pa="delete-room" data-rid="${r.id}">删除</button>
+      </div>
+    </div>
+    <div class="tree-children">
+      ${r.items.map(it=>`
+        <div class="tree-node">
+          <div class="tree-node-head">
+            <div>${it.type==="furniture"?"🛋️":"🔧"} ${esc(it.name)}
+              <span class="badge ${it.type==="furniture"?"badge-furn":"badge-fac"}">${it.type}</span>
+            </div>
+            <div>
+              <button class="ghost tiny" data-pa="edit-item" data-rid="${r.id}" data-iid="${it.id}">编辑</button>
+              <button class="danger tiny" data-pa="delete-item" data-rid="${r.id}" data-iid="${it.id}">删除</button>
+            </div>
+          </div>
+        </div>`).join("")}
+    </div>
+  </div>`;
+}
+
+function bindPropEditor(draft, origId){
+  document.getElementById("cancel-prop").onclick = closeModal;
+  document.getElementById("save-prop").onclick = async ()=>{
+    const name = document.getElementById("pname").value.trim();
+    if(!name){ alert("名称不能为空"); return; }
+    draft.name = name;
+    draft.address = document.getElementById("paddress").value.trim();
+    try{
+      await api(`/api/properties/${origId}`,"PUT",{name:draft.name,address:draft.address,rooms:draft.rooms});
+      await reload(); closeModal();
+    }catch(e){ alert("保存失败："+e.message); }
+  };
+  document.getElementById("add-room-btn").onclick = ()=>{
+    const name = prompt("新房间名称"); if(!name) return;
+    draft.rooms.push({id:uid("pr"),name,items:[]});
+    refreshPropRooms(draft);
+  };
+  document.getElementById("prop-rooms").addEventListener("click", e=>{
+    const t = e.target.closest("[data-pa]"); if(!t) return;
+    const rid = t.dataset.rid;
+    const r = draft.rooms.find(x=>x.id===rid);
+    if(!r) return;
+    const a = t.dataset.pa;
+    if(a==="rename-room"){ const n=prompt("新名称",r.name); if(!n) return; r.name=n; }
+    else if(a==="delete-room"){ if(!confirm("删除该房间？")) return; draft.rooms=draft.rooms.filter(x=>x.id!==rid); }
+    else if(a==="add-item"){
+      const n=prompt("条目名称"); if(!n) return;
+      const ty=prompt("类型（facility / furniture）","facility");
+      if(!["facility","furniture"].includes(ty)){ alert("类型错误"); return; }
+      r.items.push({id:uid("pi"),name:n,type:ty});
+    }else if(a==="edit-item"){
+      const it=r.items.find(x=>x.id===t.dataset.iid); if(!it) return;
+      const n=prompt("名称",it.name); if(!n) return;
+      const ty=prompt("类型（facility / furniture）",it.type);
+      if(!["facility","furniture"].includes(ty)){ alert("类型错误"); return; }
+      it.name=n; it.type=ty;
+    }else if(a==="delete-item"){ if(!confirm("删除该条目？")) return; r.items=r.items.filter(x=>x.id!==t.dataset.iid); }
+    refreshPropRooms(draft);
+  });
+}
+function refreshPropRooms(draft){ document.getElementById("prop-rooms").innerHTML=draft.rooms.map(r=>propRoomNode(r)).join(""); }
+
+// ── 报告表单（Check-in / Check-out） ─────────────────────
+function openReportModal(pid, type){
+  const p = DB.properties.find(x=>x.id===pid); if(!p) return;
+  pendingPhotos={}; pendingComparison={};
+  let baseline = null;
+  if(type==="check-out"){
+    baseline = getLatestCheckIn(pid);
+    if(!baseline){ alert("找不到对应的 Check-in 记录。"); return; }
+  }
+  const items = allItems(p);
+  const body = `
+    <div class="helper small">${type==="check-in"
+      ?"Check-in：每个条目至少上传 <strong>1</strong> 张照片。"
+      :"Check-out：每张 check-in 照片均需上传对比照。"}</div>
+    <div id="report-items">
+      ${items.map(({roomName,item})=>{
+        if(type==="check-in") return `
+          <div class="report-card" data-iid="${item.id}">
+            <div><strong>${esc(roomName)}</strong> » ${esc(item.name)}
+              <span class="badge ${item.type==="furniture"?"badge-furn":"badge-fac"}">${item.type}</span></div>
+            <div class="photo-grid" data-grid="${item.id}"></div>
+            <div style="margin-top:6px">
+              <button class="ghost tiny" data-add-photo="${item.id}">+ 添加照片</button>
+              <span class="small muted" id="cnt-${item.id}">0 张</span>
+            </div>
+          </div>`;
+        else{
+          const shots = (baseline.photos[item.id]||[]);
+          return `
+          <div class="report-card" data-iid="${item.id}">
+            <div><strong>${esc(roomName)}</strong> » ${esc(item.name)}
+              <span class="badge ${item.type==="furniture"?"badge-furn":"badge-fac"}">${item.type}</span>
+              <span class="small muted">入住 ${shots.length} 张</span></div>
+            ${shots.length===0?'<div class="warn small">⚠ 入住时未拍摄，无需对比。</div>':
+              shots.map((shot,idx)=>`
+                <div class="pair" style="margin-top:6px">
+                  <div>
+                    <div class="small muted">Check-in 第 ${idx+1} 张</div>
+                    <div class="photo-slot has-photo"><img src="${esc(shot)}" /></div>
+                  </div>
+                  <div>
+                    <div class="small muted">对比照 (Check-out)</div>
+                    <div class="photo-slot" data-cmp="${item.id}" data-idx="${idx}">点击上传</div>
+                  </div>
+                </div>`).join("")}
+          </div>`;
+        }
+      }).join("")}
+    </div>
+    <hr/>
+    <div style="text-align:right">
+      <button class="subtle" id="cancel-rep">取消</button>
+      <button class="primary" id="submit-rep">提交报告</button>
+    </div>`;
+  openModal(`${type==="check-in"?"提交 Check-in":"提交 Check-out"} — ${esc(p.name)}`, body,
+    {wide:true, onMount:()=>bindReportForm(p,type,baseline)});
+}
+
+function bindReportForm(p, type, baseline){
+  const container = document.getElementById("report-items");
+  function refreshGrid(iid){
+    const grid = container.querySelector(`[data-grid="${iid}"]`);
+    const arr = pendingPhotos[iid]||[];
+    grid.innerHTML = arr.map((u,i)=>`<div class="photo-slot has-photo">
+      <img src="${u}"/><span class="rm" data-rm="${iid}" data-idx="${i}">×</span></div>`).join("");
+    document.getElementById("cnt-"+iid).textContent = arr.length+" 张";
+  }
+  container.addEventListener("click", e=>{
+    if(type==="check-in"){
+      const add = e.target.closest("[data-add-photo]");
+      if(add){ pickImage(u=>{ (pendingPhotos[add.dataset.addPhoto]=pendingPhotos[add.dataset.addPhoto]||[]).push(u); refreshGrid(add.dataset.addPhoto); }); return; }
+      const rm = e.target.closest("[data-rm]");
+      if(rm){ const {rm:iid,idx} = rm.dataset; pendingPhotos[iid].splice(+idx,1); refreshGrid(iid); }
+    }else{
+      const s = e.target.closest("[data-cmp]");
+      if(s){ const {cmp:iid,idx} = s.dataset;
+        pickImage(u=>{ (pendingComparison[iid]=pendingComparison[iid]||[])[+idx]=u; s.classList.add("has-photo"); s.innerHTML=`<img src="${u}"/><span class="rm" style="cursor:pointer" title="重新上传">↺</span>`; }); }
+    }
+  });
+  document.getElementById("cancel-rep").onclick = closeModal;
+  document.getElementById("submit-rep").onclick = ()=>submitReport(p,type,baseline);
+}
+
+async function submitReport(p, type, baseline){
+  const items = allItems(p);
+  if(type==="check-in"){
+    for(const {roomName,item} of items){
+      if(!(pendingPhotos[item.id]||[]).length){ alert(`${roomName} » ${item.name} 至少需要 1 张照片。`); return; }
+    }
+    try{
+      await api(`/api/properties/${p.id}/checkin`,"POST",{photos:pendingPhotos});
+      await reload(); closeModal();
+      alert("Check-in 报告已提交，物业状态：租住中。");
+    }catch(e){ alert("提交失败："+e.message); }
+  }else{
+    for(const {roomName,item} of items){
+      const base = (baseline.photos[item.id]||[]);
+      const cmp  = (pendingComparison[item.id]||[]);
+      for(let i=0;i<base.length;i++){
+        if(!cmp[i]){ alert(`${roomName} » ${item.name} 第 ${i+1} 张缺少对比照。`); return; }
+      }
+    }
+    try{
+      await api(`/api/properties/${p.id}/checkout`,"POST",{baselineReportId:baseline.id,photos:pendingComparison});
+      await reload(); closeModal();
+      alert("Check-out 报告已提交，物业状态：准备中。");
+    }catch(e){ alert("提交失败："+e.message); }
+  }
+}
+
+function pickImage(cb){
+  const inp = document.createElement("input"); inp.type="file"; inp.accept="image/*";
+  inp.onchange = ()=>{ const f=inp.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>cb(r.result); r.readAsDataURL(f); };
+  inp.click();
+}
+
+// ── 报告查看 ──────────────────────────────────────────────
+function viewReport(rid){
+  const r = DB.reports.find(x=>x.id===rid); if(!r) return;
+  const p = DB.properties.find(x=>x.id===r.propertyId);
+  const baseline = r.type==="check-out"&&r.baselineReportId ? DB.reports.find(x=>x.id===r.baselineReportId) : null;
+  const items = p ? allItems(p) : [];
+  const body = `
+    <div class="small muted">${r.type.toUpperCase()} · ${new Date(r.createdAt).toLocaleString()}
+      ${baseline?" · 对比 Check-in："+new Date(baseline.createdAt).toLocaleString():""}</div>
+    <hr/>
+    ${items.map(({roomName,item})=>{
+      const photos = (r.photos[item.id]||[]);
+      const base   = baseline?(baseline.photos[item.id]||[]):[];
+      if(r.type==="check-in"){
+        if(!photos.length) return "";
+        return `<div class="report-card"><strong>${esc(roomName)}</strong> » ${esc(item.name)}
+          <div class="photo-grid">${photos.map(u=>`<div class="photo-slot has-photo"><img src="${esc(u)}"/></div>`).join("")}</div></div>`;
+      }else{
+        if(!photos.length&&!base.length) return "";
+        return `<div class="report-card"><strong>${esc(roomName)}</strong> » ${esc(item.name)}
+          ${base.map((u,i)=>`<div class="pair" style="margin-top:6px">
+            <div><div class="small muted">入住</div><div class="photo-slot has-photo"><img src="${esc(u)}"/></div></div>
+            <div><div class="small muted">退房对比</div>${photos[i]?`<div class="photo-slot has-photo"><img src="${esc(photos[i])}"/></div>`:'<div class="photo-slot err" style="border-color:var(--danger)">缺失</div>'}</div>
+          </div>`).join("")}
+        </div>`;
+      }
+    }).join("")}
+    <hr/><div style="text-align:right"><button class="primary" id="close-rep">关闭</button></div>`;
+  openModal(`报告 — ${p?esc(p.name):"物业已删"}`, body, {wide:true, onMount:()=>{ document.getElementById("close-rep").onclick=closeModal; }});
+}
+
+async function deleteReport(rid){
+  if(!confirm("删除该报告？照片文件也会一并删除，物业状态不会回退。")) return;
+  try{ await api(`/api/reports/${rid}`,"DELETE"); await reload(); }
+  catch(e){ alert("删除失败："+e.message); }
+}
+
+// ── Modal ─────────────────────────────────────────────────
+function openModal(title, html, opts={}){
+  const root = document.getElementById("modal-root");
+  root.innerHTML = `<div class="modal-bg" id="modal-bg">
+    <div class="modal" style="max-width:${opts.wide?"1000px":"780px"}">
+      <h2>${title}</h2>${html}</div></div>`;
+  document.getElementById("modal-bg").addEventListener("click", e=>{ if(e.target.id==="modal-bg") closeModal(); });
+  if(opts.onMount) opts.onMount();
+}
+function closeModal(){ document.getElementById("modal-root").innerHTML=""; }
+
+// ── 事件绑定（只注册一次） ────────────────────────────────
+function bind(root){
+  root.addEventListener("click", e=>{
+    const t = e.target.closest("[data-action]"); if(!t) return;
+    const act=t.dataset.action, id=t.dataset.id;
+    ({
+      newProperty,
+      editProperty: ()=>openPropertyEditor(id),
+      deleteProperty: ()=>deleteProperty(id),
+      checkIn: ()=>openReportModal(id,"check-in"),
+      checkOut: ()=>openReportModal(id,"check-out"),
+      finishPrep: ()=>finishPrep(id),
+      viewReport: ()=>viewReport(id),
+      deleteReport: ()=>deleteReport(id),
+    }[act]||function(){})();
+  });
+}
+
+bind(document.getElementById("app"));
+
+document.addEventListener("click", e=>{
+  const btn = e.target.closest("[data-toggle='tree']");
+  if(btn){ const n=btn.closest(".tree-node"); if(n) n.classList.toggle("collapsed"); }
+});
+
+document.getElementById("nav").addEventListener("click", e=>{
+  const t = e.target.closest("button"); if(!t||!t.dataset.tab) return;
+  activeTab = t.dataset.tab;
+  for(const b of document.querySelectorAll("#nav button")) b.classList.toggle("active",b.dataset.tab===activeTab);
+  render();
+});
+
+reload();
+</script>
+</body>
+</html>

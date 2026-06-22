@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>系统后台 · Hampton Tower</title>
+<link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+<header>
+  <h1>Hampton Tower 系统后台</h1>
+  <span class="meta">户型模板 · 数据管理</span>
+</header>
+<nav id="nav">
+  <button data-tab="housetypes" class="active">户型模板</button>
+  <button data-tab="data">数据管理</button>
+  <a href="/" class="site-link">← 物业管理</a>
+</nav>
+<main id="app"><div id="loading">加载中…</div></main>
+<div id="modal-root"></div>
+
+<script>"use strict";
+// ── 状态 ──────────────────────────────────────────────────
+const DB = { houseTypes:[] };
+let activeTab = "housetypes";
+
+// ── API ───────────────────────────────────────────────────
+async function api(url, method="GET", body=null){
+  const opts = {method};
+  if(body!==null){ opts.headers={"Content-Type":"application/json"}; opts.body=JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  if(res.status===204) return null;
+  const json = await res.json().catch(()=>null);
+  if(!res.ok) throw new Error((json&&json.error)||res.statusText);
+  return json;
+}
+
+async function reload(){
+  try{ DB.houseTypes = await api("/api/housetypes"); }
+  catch(e){ console.error(e); }
+  render();
+}
+
+// ── 辅助 ──────────────────────────────────────────────────
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── 渲染 ──────────────────────────────────────────────────
+function render(){
+  const app = document.getElementById("app");
+  if(activeTab==="housetypes") app.innerHTML = viewHouseTypes();
+  else app.innerHTML = viewData();
+}
+
+function viewHouseTypes(){
+  return `
+  <div class="helper">户型模板只影响<strong>之后新建</strong>的物业，不会修改已有物业的房间结构。</div>
+  <div class="card">
+    <div class="toolbar">
+      <h2 style="margin:0">户型模板（共 ${DB.houseTypes.length} 种）</h2>
+      <button class="primary" data-action="newHT">+ 新建户型</button>
+    </div>
+    ${DB.houseTypes.length===0?'<p class="muted">暂无户型模板。</p>':
+      DB.houseTypes.map(ht=>`
+      <div class="report-card">
+        <div class="collapsible-head">
+          <div>
+            <strong>${esc(ht.name)}</strong>
+            <span class="badge">${ht.rooms.length} 房间</span>
+            <span class="badge">${ht.rooms.reduce((a,r)=>a+r.items.length,0)} 条目</span>
+          </div>
+          <div>
+            <button class="ghost tiny" data-action="renameHT" data-id="${ht.id}">重命名</button>
+            <button class="subtle tiny" data-action="addRoom" data-id="${ht.id}">+ 房间</button>
+            <button class="danger tiny" data-action="deleteHT" data-id="${ht.id}">删除户型</button>
+          </div>
+        </div>
+        <div class="tree" style="margin-top:8px">
+          ${ht.rooms.map(r=>`
+            <div class="tree-node collapsed">
+              <div class="tree-node-head">
+                <div class="tree-name">
+                  <button class="toggle-btn" data-toggle="tree">▼</button>
+                  🏠 ${esc(r.name)}<span class="badge">${r.items.length}</span>
+                </div>
+                <div>
+                  <button class="subtle tiny" data-action="addItem" data-htid="${ht.id}" data-rid="${r.id}">+ 条目</button>
+                  <button class="ghost tiny" data-action="renameRoom" data-htid="${ht.id}" data-rid="${r.id}">重命名</button>
+                  <button class="danger tiny" data-action="deleteRoom" data-htid="${ht.id}" data-rid="${r.id}">删除</button>
+                </div>
+              </div>
+              <div class="tree-children">
+                ${r.items.map(it=>`
+                  <div class="tree-node">
+                    <div class="tree-node-head">
+                      <div>${it.type==="furniture"?"🛋️":"🔧"} ${esc(it.name)}
+                        <span class="badge ${it.type==="furniture"?"badge-furn":"badge-fac"}">${it.type}</span>
+                      </div>
+                      <div>
+                        <button class="ghost tiny" data-action="editItem" data-htid="${ht.id}" data-rid="${r.id}" data-iid="${it.id}">编辑</button>
+                        <button class="danger tiny" data-action="deleteItem" data-htid="${ht.id}" data-rid="${r.id}" data-iid="${it.id}">删除</button>
+                      </div>
+                    </div>
+                  </div>`).join("")}
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function viewData(){
+  return `
+  <div class="card">
+    <h2 style="margin-top:0">数据备份与恢复</h2>
+    <p class="muted small">数据存储在服务端 <code>data/</code> 目录下的 JSON 文件，照片存在 <code>uploads/</code> 目录。</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+      <button class="primary" data-action="exportData">导出全量 JSON</button>
+      <button class="ghost" data-action="importData">从 JSON 导入</button>
+      <button class="danger" data-action="resetData">重置为 seed 初始数据</button>
+    </div>
+    <input type="file" id="import-file" accept="application/json" style="display:none"/>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">户型模板摘要</h2>
+    ${DB.houseTypes.map(ht=>`
+      <div style="margin-bottom:10px">
+        <strong>${esc(ht.name)}</strong>
+        <span class="badge">${ht.rooms.length} 房间</span>
+        <span class="badge">${ht.rooms.reduce((a,r)=>a+r.items.length,0)} 条目</span>
+        <div class="small muted" style="margin-top:4px">${ht.rooms.map(r=>esc(r.name)+"("+r.items.length+")").join("  ·  ")}</div>
+      </div>`).join("")}
+  </div>`;
+}
+
+// ── 户型 CRUD ─────────────────────────────────────────────
+async function newHT(){
+  const name = prompt("新户型名称（如：3卧2卫公寓）"); if(!name) return;
+  try{ await api("/api/housetypes","POST",{name}); await reload(); }
+  catch(e){ alert("创建失败："+e.message); }
+}
+async function renameHT(id){
+  const ht = DB.houseTypes.find(h=>h.id===id); if(!ht) return;
+  const name = prompt("新名称",ht.name); if(!name) return;
+  try{ await api(`/api/housetypes/${id}`,"PUT",{name}); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+async function deleteHT(id){
+  const ht = DB.houseTypes.find(h=>h.id===id); if(!ht) return;
+  if(!confirm(`删除户型「${ht.name}」？已基于该户型创建的物业不受影响。`)) return;
+  try{ await api(`/api/housetypes/${id}`,"DELETE"); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+
+// ── 房间 CRUD ─────────────────────────────────────────────
+async function addRoom(htid){
+  const name = prompt("新房间名称"); if(!name) return;
+  try{ await api(`/api/housetypes/${htid}/rooms`,"POST",{name}); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+async function renameRoom(htid, rid){
+  const ht = DB.houseTypes.find(h=>h.id===htid);
+  const r  = ht&&ht.rooms.find(x=>x.id===rid); if(!r) return;
+  const name = prompt("新名称",r.name); if(!name) return;
+  try{ await api(`/api/housetypes/${htid}/rooms/${rid}`,"PUT",{name}); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+async function deleteRoom(htid, rid){
+  if(!confirm("删除该房间？")) return;
+  try{ await api(`/api/housetypes/${htid}/rooms/${rid}`,"DELETE"); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+
+// ── 条目 CRUD ─────────────────────────────────────────────
+async function addItem(htid, rid){
+  const name = prompt("条目名称"); if(!name) return;
+  const type = prompt("类型（facility / furniture）","facility");
+  if(!["facility","furniture"].includes(type)){ alert("类型必须是 facility 或 furniture"); return; }
+  try{ await api(`/api/housetypes/${htid}/rooms/${rid}/items`,"POST",{name,type}); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+async function editItem(htid, rid, iid){
+  const ht   = DB.houseTypes.find(h=>h.id===htid);
+  const r    = ht&&ht.rooms.find(x=>x.id===rid);
+  const item = r&&r.items.find(x=>x.id===iid); if(!item) return;
+  const name = prompt("名称",item.name); if(!name) return;
+  const type = prompt("类型（facility / furniture）",item.type);
+  if(!["facility","furniture"].includes(type)){ alert("类型错误"); return; }
+  try{ await api(`/api/housetypes/${htid}/rooms/${rid}/items/${iid}`,"PUT",{name,type}); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+async function deleteItem(htid, rid, iid){
+  if(!confirm("删除该条目？")) return;
+  try{ await api(`/api/housetypes/${htid}/rooms/${rid}/items/${iid}`,"DELETE"); await reload(); }
+  catch(e){ alert("失败："+e.message); }
+}
+
+// ── 数据管理 ──────────────────────────────────────────────
+function exportData(){
+  window.location.href = "/api/export";
+}
+
+function importData(){
+  const inp = document.getElementById("import-file");
+  inp.onchange = ()=>{
+    const f = inp.files[0]; if(!f) return;
+    const reader = new FileReader();
+    reader.onload = async ()=>{
+      try{
+        const obj = JSON.parse(reader.result);
+        if(!obj.houseTypes||!obj.properties||!obj.reports) throw new Error("结构不匹配");
+        await api("/api/import","POST",obj);
+        await reload();
+        alert("导入成功。");
+      }catch(e){ alert("导入失败："+e.message); }
+    };
+    reader.readAsText(f);
+  };
+  inp.click();
+}
+
+async function resetData(){
+  if(!confirm("将重置所有数据为 seed.json 初始内容，所有物业、报告与照片将被清空，确认继续？")) return;
+  try{
+    await api("/api/reset","POST");
+    await reload();
+    alert("已重置。");
+  }catch(e){ alert("重置失败："+e.message); }
+}
+
+// ── 事件绑定 ──────────────────────────────────────────────
+function bind(root){
+  root.addEventListener("click", e=>{
+    const t = e.target.closest("[data-action]"); if(!t) return;
+    const act  = t.dataset.action;
+    const id   = t.dataset.id;
+    const htid = t.dataset.htid;
+    const rid  = t.dataset.rid;
+    const iid  = t.dataset.iid;
+    ({
+      newHT,
+      renameHT:   ()=>renameHT(id),
+      deleteHT:   ()=>deleteHT(id),
+      addRoom:    ()=>addRoom(id),
+      renameRoom: ()=>renameRoom(htid,rid),
+      deleteRoom: ()=>deleteRoom(htid,rid),
+      addItem:    ()=>addItem(htid,rid),
+      editItem:   ()=>editItem(htid,rid,iid),
+      deleteItem: ()=>deleteItem(htid,rid,iid),
+      exportData,
+      importData,
+      resetData,
+    }[act]||function(){})();
+  });
+}
+
+bind(document.getElementById("app"));
+
+document.addEventListener("click", e=>{
+  const btn = e.target.closest("[data-toggle='tree']");
+  if(btn){ const n=btn.closest(".tree-node"); if(n) n.classList.toggle("collapsed"); }
+});
+
+document.getElementById("nav").addEventListener("click", e=>{
+  const t = e.target.closest("button"); if(!t||!t.dataset.tab) return;
+  activeTab = t.dataset.tab;
+  for(const b of document.querySelectorAll("#nav button")) b.classList.toggle("active",b.dataset.tab===activeTab);
+  render();
+});
+
+reload();
+</script>
+</body>
+</html>
