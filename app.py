@@ -11,16 +11,30 @@ import json, os, uuid, re, base64
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 
+import report_gen
+import text_gen
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024   # 300 MB（base64 照片可能较大）
 
-BASE   = os.path.dirname(__file__)
-DATA   = os.path.join(BASE, "data")
-UPLOAD = os.path.join(BASE, "uploads")
-SEED   = os.path.join(BASE, "seed.json")
+BASE    = os.path.dirname(__file__)
+DATA    = os.path.join(BASE, "data")
+UPLOAD  = os.path.join(BASE, "uploads")
+REPORTS = os.path.join(BASE, "reports_pdf")          # 生成的 PDF 报告
+SEED    = os.path.join(BASE, "seed.json")
+CONFIG  = os.path.join(BASE, "report_config.json")   # 封面配置
 
-os.makedirs(DATA,   exist_ok=True)
-os.makedirs(UPLOAD, exist_ok=True)
+os.makedirs(DATA,    exist_ok=True)
+os.makedirs(UPLOAD,  exist_ok=True)
+os.makedirs(REPORTS, exist_ok=True)
+
+
+def report_config():
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
 # ── 工具函数 ──────────────────────────────────────────────
@@ -65,6 +79,48 @@ def purge_report_photos(report: dict):
     for urls in report.get("photos", {}).values():
         for u in (urls or []):
             delete_photo(u)
+    # 同时删除生成的 PDF
+    pdf = report.get("pdf")
+    if pdf:
+        try:
+            os.remove(os.path.join(REPORTS, pdf))
+        except (FileNotFoundError, TypeError):
+            pass
+
+
+# ── 报告文字与 PDF 生成 ───────────────────────────────────
+
+def all_property_items(prop):
+    return [it for r in prop.get("rooms", []) for it in r.get("items", [])]
+
+def abs_upload_path(url):
+    name = url.split("/uploads/")[-1] if "/uploads/" in url else url
+    return os.path.join(UPLOAD, name)
+
+def build_report_texts(prop, photos_saved, texts_in, mode, kind):
+    """返回 {itemId: {condition, comments}}。
+    auto 模式调用 text_gen 预留接口（当前为占位）；manual 模式取用户填写。"""
+    texts = {}
+    for it in all_property_items(prop):
+        iid = it["id"]
+        if mode == "auto":
+            paths = [abs_upload_path(u) for u in (photos_saved.get(iid) or []) if u]
+            texts[iid] = text_gen.generate_item_text(paths, it, kind)
+        else:
+            t = texts_in.get(iid, {}) or {}
+            texts[iid] = {"condition": (t.get("condition") or "").strip(),
+                          "comments":  (t.get("comments") or "").strip()}
+    return texts
+
+def generate_pdf_for(prop, report, baseline):
+    """生成 PDF，成功返回文件名，失败返回 None（不阻断主流程）。"""
+    try:
+        out = os.path.join(REPORTS, report["id"] + ".pdf")
+        report_gen.build_report_pdf(prop, report, baseline, UPLOAD, out, report_config())
+        return report["id"] + ".pdf"
+    except Exception as e:
+        app.logger.exception("PDF 生成失败: %s", e)
+        return None
 
 
 # ── 初始化（从 seed.json 生成 data/*.json） ──────────────
@@ -106,7 +162,8 @@ def init_from_seed():
             {
                 "id":    f"{p['id']}_{r['id']}",
                 "name":  r["name"],
-                "items": [{"id": f"{p['id']}_{it['id']}", "name": it["name"], "type": it["type"]}
+                "items": [{"id": f"{p['id']}_{it['id']}", "name": it["name"], "type": it["type"],
+                           "description": it.get("description", "")}
                           for it in r["items"]],
             }
             for r in ht["rooms"]
@@ -261,7 +318,8 @@ def create_prop():
         {
             "id":    uid("pr"),
             "name":  r["name"],
-            "items": [{"id": uid("pi"), "name": it["name"], "type": it["type"]}
+            "items": [{"id": uid("pi"), "name": it["name"], "type": it["type"],
+                       "description": it.get("description", "")}
                       for it in r["items"]],
         }
         for r in ht["rooms"]
@@ -309,7 +367,8 @@ def delete_prop(pid):
 # 物业状态操作
 @app.route("/api/properties/<pid>/checkin", methods=["POST"])
 def checkin(pid):
-    d     = request.json   # {photos: {itemId: [base64, ...]}}
+    d     = request.json   # {mode, photos:{itemId:[base64]}, texts:{itemId:{condition,comments}}}
+    mode  = d.get("mode", "manual")
     props = load("properties")
     prop  = next((p for p in props if p["id"] == pid), None)
     if not prop:
@@ -321,13 +380,18 @@ def checkin(pid):
     for iid, urls in d.get("photos", {}).items():
         photos[iid] = [save_photo(u) for u in (urls or []) if u]
 
+    texts = build_report_texts(prop, photos, d.get("texts", {}), mode, "check-in")
+
     report = {
         "id":         uid("rep"),
         "propertyId": pid,
         "type":       "check-in",
         "createdAt":  datetime.now().isoformat(),
+        "mode":       mode,
         "photos":     photos,
+        "texts":      texts,
     }
+    report["pdf"] = generate_pdf_for(prop, report, None)
     reports = load("reports")
     reports.append(report)
     save("reports", reports)
@@ -337,7 +401,8 @@ def checkin(pid):
 
 @app.route("/api/properties/<pid>/checkout", methods=["POST"])
 def checkout(pid):
-    d     = request.json   # {baselineReportId, photos: {itemId: [base64|null, ...]}}
+    d     = request.json   # {baselineReportId, mode, photos:{itemId:[base64|null]}, texts:{...}}
+    mode  = d.get("mode", "manual")
     props = load("properties")
     prop  = next((p for p in props if p["id"] == pid), None)
     if not prop:
@@ -354,14 +419,19 @@ def checkout(pid):
     for iid, urls in d.get("photos", {}).items():
         photos[iid] = [(save_photo(u) if u else None) for u in (urls or [])]
 
+    texts = build_report_texts(prop, photos, d.get("texts", {}), mode, "check-out")
+
     report = {
         "id":               uid("rep"),
         "propertyId":       pid,
         "type":             "check-out",
         "createdAt":        datetime.now().isoformat(),
         "baselineReportId": d["baselineReportId"],
+        "mode":             mode,
         "photos":           photos,
+        "texts":            texts,
     }
+    report["pdf"] = generate_pdf_for(prop, report, baseline)
     reports.append(report)
     save("reports", reports)
     prop["status"] = "preparing"
@@ -384,6 +454,34 @@ def finish_prep(pid):
 @app.route("/api/reports", methods=["GET"])
 def get_reports():
     return jsonify(load("reports"))
+
+@app.route("/api/reports/<rid>/pdf")
+def report_pdf(rid):
+    reports = load("reports")
+    report  = next((r for r in reports if r["id"] == rid), None)
+    if not report:
+        return jsonify({"error": "not found"}), 404
+    prop = next((p for p in load("properties") if p["id"] == report["propertyId"]), None)
+    if not prop:
+        return jsonify({"error": "物业已删除，无法生成报告"}), 404
+
+    fname = report.get("pdf") or (rid + ".pdf")
+    path  = os.path.join(REPORTS, fname)
+    if not os.path.exists(path):   # 缺失则按需重新生成
+        baseline = None
+        if report.get("baselineReportId"):
+            baseline = next((r for r in reports if r["id"] == report["baselineReportId"]), None)
+        fname = generate_pdf_for(prop, report, baseline)
+        if not fname:
+            return jsonify({"error": "PDF 生成失败"}), 500
+        if report.get("pdf") != fname:
+            report["pdf"] = fname
+            save("reports", reports)
+        path = os.path.join(REPORTS, fname)
+
+    download = f"{report['type']}-{prop['name']}-{report['createdAt'][:10]}.pdf"
+    return send_from_directory(REPORTS, fname, as_attachment=True, download_name=download)
+
 
 @app.route("/api/reports/<rid>", methods=["DELETE"])
 def delete_report(rid):
